@@ -1,6 +1,6 @@
 import React, { useState, useEffect, useRef } from 'react';
 import { 
-  File, FileText, Download, Upload, Shield, ShieldAlert, ShieldCheck, 
+  FileText, Download, Upload, Shield, ShieldAlert, ShieldCheck, 
   Lock, Unlock, Settings, Activity, RotateCcw, Info, Clock, 
   Sparkles, Binary, CheckCircle, AlertTriangle 
 } from 'lucide-react';
@@ -217,16 +217,20 @@ function App() {
     return (x > 0) && ((x & (x - 1)) === 0);
   };
 
-  // Helper: download blob
-  const triggerDownload = (base64Data, filename) => {
+  // Helper: convert base64 to blob
+  const base64ToBlob = (base64Data) => {
     const byteCharacters = atob(base64Data);
     const byteNumbers = new Array(byteCharacters.length);
     for (let i = 0; i < byteCharacters.length; i++) {
       byteNumbers[i] = byteCharacters.charCodeAt(i);
     }
     const byteArray = new Uint8Array(byteNumbers);
-    const blob = new Blob([byteArray], { type: 'application/octet-stream' });
-    
+    return new Blob([byteArray], { type: 'application/octet-stream' });
+  };
+
+  // Helper: download blob
+  const triggerDownload = (base64Data, filename) => {
+    const blob = base64ToBlob(base64Data);
     const url = window.URL.createObjectURL(blob);
     const link = document.createElement('a');
     link.href = url;
@@ -253,14 +257,15 @@ function App() {
         setApiResponse(data);
         triggerDownload(data.datosBinariosBase64, data.nombreArchivoSugerido);
         // Load the compressed file automatically as the work file
-        const blob = new Blob([new Uint8Array(atob(data.datosBinariosBase64).split("").map(c => c.charCodeAt(0)))], { type: 'application/octet-stream' });
+        const blob = base64ToBlob(data.datosBinariosBase64);
         const autoFile = new File([blob], data.nombreArchivoSugerido, { type: 'application/octet-stream' });
         loadWorkFile(autoFile);
       } else {
         alert('Error al comprimir con Huffman.');
       }
     } catch (e) {
-      alert('Error de conexión.');
+      console.error(e);
+      alert('Error de conexión (' + e.message + ')');
     } finally {
       setProcessing(false);
     }
@@ -288,7 +293,8 @@ function App() {
         alert('Error al descomprimir. ¿El archivo es un .huf válido?');
       }
     } catch (e) {
-      alert('Error de conexión.');
+      console.error(e);
+      alert('Error de conexión (' + e.message + ')');
     } finally {
       setProcessing(false);
     }
@@ -321,14 +327,15 @@ function App() {
         triggerDownload(data.datosBinariosBase64, data.nombreArchivoSugerido);
         
         // Auto-load protected file as work file
-        const blob = new Blob([new Uint8Array(atob(data.datosBinariosBase64).split("").map(c => c.charCodeAt(0)))], { type: 'application/octet-stream' });
+        const blob = base64ToBlob(data.datosBinariosBase64);
         const autoFile = new File([blob], data.nombreArchivoSugerido, { type: 'application/octet-stream' });
         loadWorkFile(autoFile);
       } else {
         alert('Error al aplicar protección Hamming.');
       }
     } catch (e) {
-      alert('Error de conexión.');
+      console.error(e);
+      alert('Error de conexión (' + e.message + ')');
     } finally {
       setProcessing(false);
     }
@@ -368,7 +375,8 @@ function App() {
         alert('Error al desproteger. Asegurate de que el archivo tenga una cabecera Hamming válida.');
       }
     } catch (e) {
-      alert('Error de conexión.');
+      console.error(e);
+      alert('Error de conexión (' + e.message + ')');
     } finally {
       setProcessing(false);
     }
