@@ -14,7 +14,7 @@
 	<name>pm3-backend</name>
 	<description>PM3 Unified Huffman and Hamming Backend</description>
 	<properties>
-		<java.version>24</java.version>
+		<java.version>21</java.version>
 	</properties>
 	<dependencies>
 		<dependency>
