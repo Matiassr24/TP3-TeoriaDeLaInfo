@@ -30,6 +30,7 @@ public class PM3Controller {
     @PostMapping("/huffman/compress")
     public ResponseEntity<PM3Response> huffmanCompress(@RequestParam("file") MultipartFile archivo) throws Exception {
         byte[] bytesArchivo = archivo.getBytes();
+        System.out.println("[DEBUG] Compress request received. File: " + archivo.getOriginalFilename() + ", size: " + bytesArchivo.length + " bytes");
         if (bytesArchivo.length == 0) {
             return ResponseEntity.badRequest().build();
         }
@@ -98,6 +99,7 @@ public class PM3Controller {
     @PostMapping("/huffman/decompress")
     public ResponseEntity<PM3Response> huffmanDecompress(@RequestParam("file") MultipartFile archivo) throws Exception {
         byte[] datosComprimidos = archivo.getBytes();
+        System.out.println("[DEBUG] Decompress request received. File: " + archivo.getOriginalFilename() + ", size: " + datosComprimidos.length + " bytes");
         if (datosComprimidos.length == 0) {
             return ResponseEntity.badRequest().build();
         }
@@ -106,7 +108,27 @@ public class PM3Controller {
 
         long tamanoComprimidoBytes = archivo.getSize();
         long tamanoDescomprimidoBytes = bytesDescomprimidos.length;
-        
+
+        // Calcular estadísticas sobre los bytes descomprimidos para mostrarlas en la pestaña de Estadísticas
+        Map<Character, Integer> frecuencias = new HashMap<>();
+        Map<Character, String> codigos = new HashMap<>();
+        double entropia = 0;
+        double longitudMedia = 0;
+        double eficiencia = 0;
+        double ratioCompresion = 0;
+
+        if (bytesDescomprimidos.length > 0) {
+            frecuencias = huffmanService.calcularFrecuencias(bytesDescomprimidos);
+            HuffmanNode raiz = huffmanService.construirArbol(frecuencias);
+            codigos = huffmanService.generarCodigos(raiz);
+
+            int totalSimbolos = bytesDescomprimidos.length;
+            entropia = huffmanService.calcularEntropia(frecuencias, totalSimbolos);
+            longitudMedia = huffmanService.calcularLongitudMedia(frecuencias, codigos, totalSimbolos);
+            eficiencia = longitudMedia > 0 ? entropia / longitudMedia : 0;
+            ratioCompresion = tamanoComprimidoBytes > 0 ? (double) tamanoDescomprimidoBytes / tamanoComprimidoBytes : 0;
+        }
+
         String textoDescomprimido = new String(bytesDescomprimidos, StandardCharsets.UTF_8);
         String base64Descomprimido = Base64.getEncoder().encodeToString(bytesDescomprimidos);
 
@@ -119,8 +141,14 @@ public class PM3Controller {
 
         PM3Response respuesta = PM3Response.builder()
                 .textoOriginal(textoDescomprimido)
+                .frecuencias(frecuencias)
+                .codigos(codigos)
+                .entropia(entropia)
+                .longitudMedia(longitudMedia)
+                .eficiencia(eficiencia)
+                .tamanoOriginalBytes(tamanoDescomprimidoBytes)
                 .tamanoComprimidoBytes(tamanoComprimidoBytes)
-                .tamanoDescomprimidoBytes(tamanoDescomprimidoBytes)
+                .ratioCompresion(ratioCompresion)
                 .datosBinariosBase64(base64Descomprimido)
                 .nombreArchivoSugerido(baseName + ".dhu")
                 .build();
@@ -135,6 +163,7 @@ public class PM3Controller {
             @RequestParam(value = "lockTimestamp", defaultValue = "0") long lockTimestamp) throws IOException {
 
         byte[] datos = archivo.getBytes();
+        System.out.println("[DEBUG] Protect request received. File: " + archivo.getOriginalFilename() + ", size: " + datos.length + " bytes");
         String filename = archivo.getOriginalFilename() != null ? archivo.getOriginalFilename() : "";
         boolean isHuffman = filename.toLowerCase().endsWith(".huf");
 
@@ -224,6 +253,7 @@ public class PM3Controller {
             @RequestParam("corregir") boolean corregir) throws Exception {
 
         byte[] data = archivo.getBytes();
+        System.out.println("[DEBUG] Unprotect request received. File: " + archivo.getOriginalFilename() + ", size: " + data.length + " bytes");
         String filename = archivo.getOriginalFilename() != null ? archivo.getOriginalFilename() : "file.HA1";
 
         if (!PM3Header.hasValidHeader(data)) {
@@ -246,17 +276,11 @@ public class PM3Controller {
         byte[] bytesDesprotegidos = unprotectResult.data;
         byte[] bytesFinales = bytesDesprotegidos;
         String textoResultado = "";
-        boolean decompressed = false;
 
-        // Si el payload era Huffman-comprimido, realizamos la descompresión automáticamente
         if (unprotectResult.isHuffman) {
-            try {
-                bytesFinales = huffmanService.descomprimir(bytesDesprotegidos);
-                textoResultado = new String(bytesFinales, StandardCharsets.UTF_8);
-                decompressed = true;
-            } catch (Exception e) {
-                textoResultado = "Error al descomprimir Huffman tras desproteger Hamming: " + e.getMessage();
-            }
+            textoResultado = "Archivo desprotegido con éxito (Hamming removido).\n" +
+                             "El archivo contiene un flujo compactado con Huffman.\n" +
+                             "Descárgalo como archivo .huf, cárgalo en la zona de trabajo y presiona 'Descompactar (.huf)'.";
         } else {
             textoResultado = new String(bytesDesprotegidos, StandardCharsets.UTF_8);
         }
@@ -264,10 +288,15 @@ public class PM3Controller {
         String base64Final = Base64.getEncoder().encodeToString(bytesFinales);
 
         // Extension mapping
-        String ext = corregir ? ".DC" : ".DE";
-        if (unprotectResult.mPower == 10) ext += "2";
-        else if (unprotectResult.mPower == 14) ext += "3";
-        else ext += "1";
+        String ext;
+        if (unprotectResult.isHuffman) {
+            ext = ".huf";
+        } else {
+            ext = corregir ? ".DC" : ".DE";
+            if (unprotectResult.mPower == 10) ext += "2";
+            else if (unprotectResult.mPower == 14) ext += "3";
+            else ext += "1";
+        }
 
         String baseName = filename;
         if (baseName.contains(".")) {

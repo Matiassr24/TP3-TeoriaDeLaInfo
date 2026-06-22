@@ -27,6 +27,9 @@ function App() {
   // Results & stats
   const [processing, setProcessing] = useState(false);
   const [apiResponse, setApiResponse] = useState(null);
+  const [huffmanStats, setHuffmanStats] = useState(null);
+  const [hammingStats, setHammingStats] = useState(null);
+  const [flippedBits, setFlippedBits] = useState({});
   const [countdown, setCountdown] = useState('');
   const [lockTimerId, setLockTimerId] = useState(null);
 
@@ -85,6 +88,7 @@ function App() {
   const loadWorkFile = async (file) => {
     setWorkFile(file);
     setApiResponse(null);
+    setFlippedBits({});
     const name = file.name.toUpperCase();
     
     let type = 'text';
@@ -203,6 +207,12 @@ function App() {
       return b;
     });
 
+    // Toggle in flippedBits map
+    setFlippedBits(prev => ({
+      ...prev,
+      [`${blockIdx}-${bitPos}`]: !prev[`${blockIdx}-${bitPos}`]
+    }));
+
     // Determine if corrupted
     setWorkFileParsed({
       ...workFileParsed,
@@ -235,7 +245,10 @@ function App() {
     const link = document.createElement('a');
     link.href = url;
     link.download = filename;
+    document.body.appendChild(link);
     link.click();
+    document.body.removeChild(link);
+    window.URL.revokeObjectURL(url);
   };
 
   // API Call: Huffman Compress
@@ -255,6 +268,7 @@ function App() {
       if (response.ok) {
         const data = await response.json();
         setApiResponse(data);
+        setHuffmanStats(data);
         triggerDownload(data.datosBinariosBase64, data.nombreArchivoSugerido);
         // Load the compressed file automatically as the work file
         const blob = base64ToBlob(data.datosBinariosBase64);
@@ -288,6 +302,7 @@ function App() {
       if (response.ok) {
         const data = await response.json();
         setApiResponse(data);
+        setHuffmanStats(data);
         triggerDownload(data.datosBinariosBase64, data.nombreArchivoSugerido);
       } else {
         alert('Error al descomprimir. ¿El archivo es un .huf válido?');
@@ -300,8 +315,8 @@ function App() {
     }
   };
 
-  // API Call: Hamming Protect
-  const handleProtect = async () => {
+  // API Call: Hamming Protect for Work File (e.g. .huf compressed or .txt)
+  const handleProtectWorkFile = async () => {
     if (!workFile) return;
     setProcessing(true);
     setApiResponse(null);
@@ -324,6 +339,7 @@ function App() {
       if (response.ok) {
         const data = await response.json();
         setApiResponse(data);
+        setHammingStats(data);
         triggerDownload(data.datosBinariosBase64, data.nombreArchivoSugerido);
         
         // Auto-load protected file as work file
@@ -369,7 +385,13 @@ function App() {
           setApiResponse({ ...data, locked: true });
         } else {
           setApiResponse(data);
+          setHammingStats(data);
           triggerDownload(data.datosBinariosBase64, data.nombreArchivoSugerido);
+
+          // Auto-load desprotegido file as work file so user can immediately decompress it
+          const blob = base64ToBlob(data.datosBinariosBase64);
+          const autoFile = new File([blob], data.nombreArchivoSugerido, { type: 'application/octet-stream' });
+          loadWorkFile(autoFile);
         }
       } else {
         alert('Error al desproteger. Asegurate de que el archivo tenga una cabecera Hamming válida.');
@@ -382,15 +404,47 @@ function App() {
     }
   };
 
-  // Local trigger to inject 1 error per block randomly
+  // Helper to convert Uint8Array to base64, trigger download, and auto-load as work file
+  const triggerLocalCorruptedFileDownloadAndLoad = (rawBytes) => {
+    let ext = '.HE1';
+    if (mPower === 10) ext = '.HE2';
+    if (mPower === 14) ext = '.HE3';
+
+    let base = workFile ? workFile.name : 'corrupted';
+    if (base.includes(".")) {
+      base = base.substring(0, base.lastIndexOf("."));
+    }
+    // Replace .HA to .HE just in case
+    base = base.replace('.HA', '.HE');
+    const suggestedName = base + ext;
+
+    // Convert rawBytes (Uint8Array) to base64
+    let binary = '';
+    const len = rawBytes.byteLength;
+    for (let i = 0; i < len; i++) {
+      binary += String.fromCharCode(rawBytes[i]);
+    }
+    const base64Data = btoa(binary);
+
+    // Trigger download
+    triggerDownload(base64Data, suggestedName);
+
+    // Auto load as work file
+    const blob = base64ToBlob(base64Data);
+    const autoFile = new File([blob], suggestedName, { type: 'application/octet-stream' });
+    loadWorkFile(autoFile);
+  };
+
+  // Local trigger to inject 1 error per block randomly (1% rate, min 1)
   const injectOneErrorLocal = () => {
     if (!workFileParsed) return;
     const { n, blocks, rawBytes } = workFileParsed;
     
-    // For each block, with 50% probability, we toggle a random bit
     let injected = 0;
+    const newFlipped = {};
     const updatedBlocks = blocks.map(b => {
-      if (Math.random() < 0.5) {
+      // 1% probability of error per block
+      if (Math.random() < 0.01) {
         const bitIdx = Math.floor(Math.random() * n); // 0 to n-1
         const bitIndex = b.index * n + bitIdx;
         const byteIndex = Math.floor(bitIndex / 8);
@@ -398,6 +452,7 @@ function App() {
         
         rawBytes[16 + byteIndex] ^= (1 << bitOffset);
         injected++;
+        newFlipped[`${b.index}-${bitIdx + 1}`] = true;
         
         const nextBits = [...b.bits];
         nextBits[bitIdx] ^= 1;
@@ -406,37 +461,67 @@ function App() {
       return b;
     });
 
+    // If no errors were injected, force exactly 1 error in a random block
+    if (injected === 0 && blocks.length > 0) {
+      const randomBlockIdx = Math.floor(Math.random() * blocks.length);
+      const bitIdx = Math.floor(Math.random() * n);
+      
+      const b = blocks[randomBlockIdx];
+      const bitIndex = b.index * n + bitIdx;
+      const byteIndex = Math.floor(bitIndex / 8);
+      const bitOffset = 7 - (bitIndex % 8);
+      
+      rawBytes[16 + byteIndex] ^= (1 << bitOffset);
+      injected++;
+      newFlipped[`${b.index}-${bitIdx + 1}`] = true;
+      
+      updatedBlocks[randomBlockIdx] = {
+        ...b,
+        bits: b.bits.map((bitVal, idx) => idx === bitIdx ? bitVal ^ 1 : bitVal)
+      };
+    }
+
+    setFlippedBits(newFlipped);
     setWorkFileParsed({
       ...workFileParsed,
       blocks: updatedBlocks,
       rawBytes: rawBytes
     });
     setWorkFileType('corrupted');
-    alert(`Inyectado 1 error aleatorio en ${injected} bloques.`);
+    alert(`Inyectado(s) ${injected} error(es) aleatorio(s) (tasa 1% de bloques, min 1). Descargando archivo .HE...`);
+    triggerLocalCorruptedFileDownloadAndLoad(rawBytes);
   };
 
-  // Local trigger to inject 2 errors in the first block
+  // Local trigger to inject 2 errors in a random block
   const injectTwoErrorsLocal = () => {
     if (!workFileParsed || workFileParsed.blocks.length === 0) return;
-    const { n, rawBytes } = workFileParsed;
+    const { n, blocks, rawBytes } = workFileParsed;
     
-    // Choose block 0, flip bits at position 2 and 4 (0-indexed indices)
-    const p1 = 2;
-    const p2 = 5;
+    // Select a random block index
+    const randomBlockIdx = Math.floor(Math.random() * blocks.length);
     
-    const bitIndex1 = p1;
+    // Choose two distinct random bit positions in that block
+    let p1 = Math.floor(Math.random() * n);
+    let p2 = Math.floor(Math.random() * n);
+    while (p1 === p2 && n > 1) {
+      p2 = Math.floor(Math.random() * n);
+    }
+    
+    // Flip bit 1
+    const bitIndex1 = randomBlockIdx * n + p1;
     const byteIdx1 = Math.floor(bitIndex1 / 8);
     const offset1 = 7 - (bitIndex1 % 8);
     rawBytes[16 + byteIdx1] ^= (1 << offset1);
 
-    const bitIndex2 = p2;
+    // Flip bit 2
+    const bitIndex2 = randomBlockIdx * n + p2;
     const byteIdx2 = Math.floor(bitIndex2 / 8);
     const offset2 = 7 - (bitIndex2 % 8);
     rawBytes[16 + byteIdx2] ^= (1 << offset2);
 
     // Update block bits in visual grid
-    const updatedBlocks = workFileParsed.blocks.map(b => {
-      if (b.index === 0) {
+    const updatedBlocks = blocks.map(b => {
+      if (b.index === randomBlockIdx) {
         const nextBits = [...b.bits];
         nextBits[p1] ^= 1;
         nextBits[p2] ^= 1;
@@ -445,13 +530,18 @@ function App() {
       return b;
     });
 
+    setFlippedBits({
+      [`${randomBlockIdx}-${p1 + 1}`]: true,
+      [`${randomBlockIdx}-${p2 + 1}`]: true
+    });
     setWorkFileParsed({
       ...workFileParsed,
       blocks: updatedBlocks,
       rawBytes: rawBytes
     });
     setWorkFileType('corrupted');
-    alert('Inyectados exactamente 2 errores programados en el primer bloque (posiciones 3 y 6).');
+    alert(`Inyectados exactamente 2 errores aleatorios en el módulo ${randomBlockIdx} (posiciones ${p1 + 1} y ${p2 + 1}). Descargando archivo .HE...`);
+    triggerLocalCorruptedFileDownloadAndLoad(rawBytes);
   };
 
   // Reset file loaders
@@ -463,6 +553,9 @@ function App() {
     setWorkFileType('');
     setWorkFileParsed(null);
     setApiResponse(null);
+    setHuffmanStats(null);
+    setHammingStats(null);
+    setFlippedBits({});
   };
 
   // Drag and drop event handlers
@@ -497,39 +590,108 @@ function App() {
   return (
     <div className="app-container">
       {/* Brand Header */}
-      <header className="header-glass">
-        <div className="brand-section">
-          <Shield className="brand-icon" size={32} color="#3b82f6" />
-          <div>
-            <h1 className="brand-title">Proyecto Laboratorio Final</h1>
-            <p style={{ fontSize: '0.8rem', color: 'var(--text-secondary)' }}>Teoría de la Información &bull; 2026</p>
-          </div>
-          <span className="brand-badge">PM3: Huffman + Hamming</span>
+      <header className="header-glass" style={{ display: 'flex', flexDirection: 'row', justifyContent: 'space-between', alignItems: 'center', padding: '0.5rem 1.25rem', gap: '0.75rem' }}>
+        {/* Brand logo (extremely compact) */}
+        <div className="brand-section" style={{ display: 'flex', alignItems: 'center', gap: '0.5rem', minWidth: 'fit-content' }}>
+          <Shield className="brand-icon" size={22} color="#3b82f6" />
+          <h1 className="brand-title" style={{ fontSize: '1.15rem', margin: 0 }}>PM3 Lab</h1>
         </div>
-        
+
+        {/* Unified Operations Bar */}
+        <div style={{ display: 'flex', gap: '0.35rem', alignItems: 'center', background: 'rgba(0, 0, 0, 0.25)', padding: '0.3rem 0.5rem', borderRadius: 'var(--radius-md)', border: '1px solid var(--surface-border)' }}>
+          {/* Huffman Group */}
+          <span style={{ fontSize: '0.75rem', fontWeight: 600, color: 'var(--text-secondary)', textTransform: 'uppercase', padding: '0 0.15rem' }}>Huf:</span>
+          <button 
+            className={`btn-primary ${!originalFile || processing ? 'btn-disabled' : ''}`}
+            disabled={!originalFile || processing}
+            onClick={handleCompress}
+            style={{ padding: '0.35rem 0.65rem', fontSize: '0.75rem', width: 'auto' }}
+          >
+            <Sparkles size={12} /> Compactar
+          </button>
+          <button 
+            className={`btn-secondary ${!workFile || workFileType !== 'huf' || processing ? 'btn-disabled' : ''}`}
+            disabled={!workFile || workFileType !== 'huf' || processing}
+            onClick={handleDecompress}
+            style={{ padding: '0.35rem 0.65rem', fontSize: '0.75rem', width: 'auto' }}
+          >
+            <Download size={12} /> Descompactar
+          </button>
+
+          {/* Divider */}
+          <div style={{ width: '1px', height: '16px', background: 'var(--surface-border)', margin: '0 0.25rem' }}></div>
+
+          {/* Hamming Group */}
+          <span style={{ fontSize: '0.75rem', fontWeight: 600, color: 'var(--text-secondary)', textTransform: 'uppercase', padding: '0 0.15rem' }}>Ham:</span>
+          <button 
+            className={`btn-primary ${!workFile || processing || workFileType === 'protected' || workFileType === 'corrupted' ? 'btn-disabled' : ''}`}
+            disabled={!workFile || processing || workFileType === 'protected' || workFileType === 'corrupted'}
+            onClick={handleProtectWorkFile}
+            style={{ padding: '0.35rem 0.65rem', fontSize: '0.75rem', width: 'auto' }}
+          >
+            <Shield size={12} /> Proteger
+          </button>
+          <button 
+            className={`btn-success ${!workFile || (workFileType !== 'protected' && workFileType !== 'corrupted') || processing ? 'btn-disabled' : ''}`}
+            disabled={!workFile || (workFileType !== 'protected' && workFileType !== 'corrupted') || processing}
+            onClick={handleUnprotect}
+            style={{ padding: '0.35rem 0.65rem', fontSize: '0.75rem', width: 'auto' }}
+          >
+            {corregir ? <ShieldCheck size={12} /> : <ShieldAlert size={12} />}
+            Desproteger
+          </button>
+
+          {/* Divider */}
+          <div style={{ width: '1px', height: '16px', background: 'var(--surface-border)', margin: '0 0.25rem' }}></div>
+
+          {/* Errores Group */}
+          <span style={{ fontSize: '0.75rem', fontWeight: 600, color: 'var(--text-secondary)', textTransform: 'uppercase', padding: '0 0.15rem' }}>Err:</span>
+          <button 
+            className={`btn-primary ${!workFileParsed || processing ? 'btn-disabled' : ''}`}
+            disabled={!workFileParsed || processing}
+            onClick={injectOneErrorLocal}
+            style={{ padding: '0.35rem 0.65rem', fontSize: '0.75rem', width: 'auto' }}
+            title={!workFileParsed ? "Carga un archivo Hamming primero" : "Inyectar 1 error aleatorio"}
+          >
+            <ShieldAlert size={12} /> 1 Error
+          </button>
+          <button 
+            className={`btn-danger ${!workFileParsed || processing ? 'btn-disabled' : ''}`}
+            disabled={!workFileParsed || processing}
+            onClick={injectTwoErrorsLocal}
+            style={{ padding: '0.35rem 0.65rem', fontSize: '0.75rem', width: 'auto' }}
+            title={!workFileParsed ? "Carga un archivo Hamming primero" : "Inyectar 2 errores aleatorios"}
+          >
+            <AlertTriangle size={12} /> 2 Errores
+          </button>
+
+          {/* Processing Indicator */}
+          {processing && (
+            <>
+              <div style={{ width: '1px', height: '16px', background: 'var(--surface-border)', margin: '0 0.25rem' }}></div>
+              <span style={{ fontSize: '0.75rem', color: 'var(--primary)', display: 'flex', alignItems: 'center', gap: '0.25rem', animation: 'pulse 1.5s infinite', paddingRight: '0.15rem' }}>
+                ⌛ ...
+              </span>
+            </>
+          )}
+        </div>
+
         {/* Navigation Tabs */}
-        <nav className="nav-tabs">
+        <nav className="nav-tabs" style={{ display: 'flex', gap: '0.25rem', padding: '0.25rem', borderRadius: '30px', minWidth: 'fit-content' }}>
           <button 
             className={`tab-btn ${activeTab === 'workflow' ? 'active' : ''}`}
             onClick={() => setActiveTab('workflow')}
+            style={{ padding: '0.35rem 0.75rem', fontSize: '0.8rem', borderRadius: '20px' }}
           >
-            <Activity size={18} />
-            Flujo de Trabajo
-          </button>
-          <button 
-            className={`tab-btn ${activeTab === 'interactive' ? 'active' : ''}`}
-            onClick={() => setActiveTab('interactive')}
-            disabled={!workFileParsed}
-            title={!workFileParsed ? "Cargá un archivo Hamming primero" : ""}
-          >
-            <Binary size={18} />
-            Inyector de Errores
+            <Activity size={14} />
+            Visores
           </button>
           <button 
             className={`tab-btn ${activeTab === 'stats' ? 'active' : ''}`}
             onClick={() => setActiveTab('stats')}
+            style={{ padding: '0.35rem 0.75rem', fontSize: '0.8rem', borderRadius: '20px' }}
           >
-            <Sparkles size={18} />
+            <Sparkles size={14} />
             Estadísticas
           </button>
         </nav>
@@ -538,7 +700,7 @@ function App() {
       {/* Main Grid Layout */}
       <div className="dashboard-grid">
         
-        {/* LEFT COLUMN: Controls & File uploading */}
+        {/* LEFT COLUMN: Controls, File uploading & Operations */}
         <div style={{ display: 'flex', flexDirection: 'column', gap: '1.5rem' }}>
           
           {/* File Inputs Card */}
@@ -563,17 +725,17 @@ function App() {
                   ref={origInputRef} 
                   onChange={handleOrigFileSelect} 
                   style={{ display: 'none' }} 
-                  accept=".txt"
+                  accept=".txt,.dhu,.DC1,.DC2,.DC3,.DE1,.DE2,.DE3"
                 />
                 <div className="dropzone-icon">
                   <FileText size={24} />
                 </div>
                 <div>
                   <p style={{ fontSize: '0.9rem', fontWeight: 600 }}>
-                    {originalFile ? `Cargado: ${originalFile.name}` : 'Subí el archivo original .txt'}
+                    {originalFile ? `Cargado: ${originalFile.name}` : 'Subí el original (.txt, .dhu, .DC1, etc.)'}
                   </p>
                   <p className="dropzone-sub" style={{ fontSize: '0.75rem', color: 'var(--text-muted)' }}>
-                    Para iniciar el proceso de compactación y protección
+                    Como referencia o para iniciar compactación
                   </p>
                 </div>
               </div>
@@ -581,7 +743,7 @@ function App() {
 
             {/* Work File Zone */}
             <div className="form-group">
-              <label className="form-label">Archivo de Trabajo (.huf, .HA1, .HE1, etc.)</label>
+              <label className="form-label">Archivo de Trabajo (.txt, .huf, .HA1, .HE1, etc.)</label>
               <div 
                 className={`dropzone ${dragOverWork ? 'active' : ''}`}
                 onDragOver={handleDragOverWork}
@@ -603,7 +765,7 @@ function App() {
                     {workFile ? `Trabajando: ${workFile.name}` : 'Subí un archivo a procesar o analizar'}
                   </p>
                   <p className="dropzone-sub" style={{ fontSize: '0.75rem', color: 'var(--text-muted)' }}>
-                    Permite descompactar, desproteger, o inyectar errores
+                    Permite proteger, descompactar, desproteger o inyectar errores
                   </p>
                 </div>
               </div>
@@ -654,7 +816,7 @@ function App() {
 
             {/* Lock Date/Time */}
             <div className="form-group">
-              <div style={{ display: 'flex', alignItems: 'center', justifyBetween: 'space-between' }}>
+              <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between' }}>
                 <label className="form-label" style={{ display: 'flex', alignItems: 'center', gap: '0.5rem', cursor: 'pointer' }}>
                   <input 
                     type="checkbox" 
@@ -689,75 +851,18 @@ function App() {
               </p>
             </div>
           </div>
+
+
+
         </div>
 
         {/* RIGHT COLUMN: Action panels & Interactive bit flip */}
         <div>
           
-          {/* TAB 1: WORKFLOW VIEW */}
+          {/* TAB 1: VISORES DE DATOS VIEW */}
           {activeTab === 'workflow' && (
             <div style={{ display: 'flex', flexDirection: 'column', gap: '1.5rem' }}>
               
-              {/* Operations panel */}
-              <div className="panel">
-                <h2 className="panel-title">
-                  <Activity size={22} color="#10b981" />
-                  Operaciones Disponibles
-                </h2>
-                
-                <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: '1rem' }}>
-                  
-                  {/* Huffman Column */}
-                  <div style={{ display: 'flex', flexDirection: 'column', gap: '1rem', borderRight: '1px solid var(--surface-border)', paddingRight: '1rem' }}>
-                    <h3 style={{ fontSize: '0.95rem', fontWeight: 600, color: 'var(--text-secondary)' }}>Compresión (Huffman)</h3>
-                    
-                    <button 
-                      className={`btn-primary ${!originalFile || processing ? 'btn-disabled' : ''}`}
-                      disabled={!originalFile || processing}
-                      onClick={handleCompress}
-                    >
-                      <Sparkles size={16} /> Compactar Original
-                    </button>
-                    
-                    <button 
-                      className={`btn-secondary ${!workFile || workFileType !== 'huf' || processing ? 'btn-disabled' : ''}`}
-                      disabled={!workFile || workFileType !== 'huf' || processing}
-                      onClick={handleDecompress}
-                    >
-                      <Download size={16} /> Descompactar (.huf)
-                    </button>
-                  </div>
-                  
-                  {/* Hamming Column */}
-                  <div style={{ display: 'flex', flexDirection: 'column', gap: '1rem' }}>
-                    <h3 style={{ fontSize: '0.95rem', fontWeight: 600, color: 'var(--text-secondary)' }}>Protección (Hamming)</h3>
-                    
-                    <button 
-                      className={`btn-primary ${!workFile || processing || workFileType === 'protected' ? 'btn-disabled' : ''}`}
-                      disabled={!workFile || processing || workFileType === 'protected'}
-                      onClick={handleProtect}
-                    >
-                      <Shield size={16} /> Proteger Archivo
-                    </button>
-                    
-                    <button 
-                      className={`btn-success ${!workFile || (workFileType !== 'protected' && workFileType !== 'corrupted') || processing ? 'btn-disabled' : ''}`}
-                      disabled={!workFile || (workFileType !== 'protected' && workFileType !== 'corrupted') || processing}
-                      onClick={handleUnprotect}
-                    >
-                      {corregir ? <ShieldCheck size={16} /> : <ShieldAlert size={16} />}
-                      Desproteger Archivo
-                    </button>
-                  </div>
-                </div>
-
-                {processing && (
-                  <div style={{ padding: '1rem', background: 'rgba(59,130,246,0.1)', border: '1px solid var(--primary)', borderRadius: 'var(--radius-md)', textAlign: 'center' }}>
-                    ⌛ Procesando en el servidor backend...
-                  </div>
-                )}
-              </div>
-
               {/* View/Result Panel */}
               <div className="panel">
                 <div className="panel-header">
@@ -789,12 +894,21 @@ function App() {
                   </div>
                 ) : (
                   <>
-                    <div style={{ display: 'flex', flexDirection: 'column', gap: '0.5rem' }}>
-                      <span className="form-label">
-                        {apiResponse?.textoOriginal ? 'Texto Recuperado / Resultado:' : 'Texto Original / Vista Previa:'}
-                      </span>
-                      <div className="preview-container">
-                        {apiResponse?.textoOriginal || originalText || workFileText || 'Esperando archivo o acción...'}
+                    <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(300px, 1fr))', gap: '1.5rem' }}>
+                      {/* Left: Original reference file text */}
+                      <div style={{ display: 'flex', flexDirection: 'column', gap: '0.5rem' }}>
+                        <span className="form-label">Texto de Entrada / Referencia (Izquierda):</span>
+                        <div className="preview-container">
+                          {originalText || (workFileType === 'text' ? workFileText : '') || 'Subí un archivo a la izquierda (.txt o .DCx) para ver su contenido aquí.'}
+                        </div>
+                      </div>
+                      
+                      {/* Right: Output/recovered text */}
+                      <div style={{ display: 'flex', flexDirection: 'column', gap: '0.5rem' }}>
+                        <span className="form-label">Resultado del Procesamiento (Derecha):</span>
+                        <div className="preview-container" style={{ color: apiResponse?.textoOriginal && apiResponse.textoOriginal.includes("Error") ? 'var(--danger)' : 'hsl(120, 100%, 80%)' }}>
+                          {apiResponse?.textoOriginal || (apiResponse?.cadenaBits ? `Cadena de Bits Comprimidos:\n${apiResponse.cadenaBits}` : '') || 'Esperando acción (Compactar / Desproteger / Descompactar)...'}
+                        </div>
                       </div>
                     </div>
 
@@ -832,122 +946,7 @@ function App() {
             </div>
           )}
 
-          {/* TAB 2: INTERACTIVE BIT INJECTOR VIEW */}
-          {activeTab === 'interactive' && workFileParsed && (
-            <div className="panel">
-              <div className="panel-header">
-                <h2 className="panel-title">
-                  <Binary size={22} color="#3b82f6" />
-                  Inyector de Errores Interactivo (SEC-DED)
-                </h2>
-                <div style={{ display: 'flex', gap: '0.5rem' }}>
-                  <button className="btn-secondary" style={{ padding: '0.4rem 0.8rem', fontSize: '0.8rem', width: 'auto' }} onClick={injectOneErrorLocal}>
-                    1 Error Aleatorio
-                  </button>
-                  <button className="btn-secondary" style={{ padding: '0.4rem 0.8rem', fontSize: '0.8rem', width: 'auto' }} onClick={injectTwoErrorsLocal}>
-                    2 Errores (Blq. 0)
-                  </button>
-                </div>
-              </div>
 
-              <div style={{ background: 'rgba(255,255,255,0.01)', border: '1px solid var(--surface-border)', borderRadius: 'var(--radius-md)', padding: '1rem' }}>
-                <p style={{ fontSize: '0.85rem', color: 'var(--text-secondary)' }}>
-                  Visualización de los primeros bloques del archivo protegido. 
-                  Hacé clic en cualquier celda de bit para <strong>invertirlo (flip)</strong> e introducir un error de manera programada.
-                </p>
-                <div style={{ display: 'flex', gap: '1rem', marginTop: '0.75rem', flexWrap: 'wrap' }}>
-                  <span style={{ display: 'inline-flex', alignItems: 'center', gap: '0.25rem', fontSize: '0.75rem' }}>
-                    <span className="bit-cell bit-data" style={{ width: 14, height: 14, cursor: 'default' }}></span> Datos
-                  </span>
-                  <span style={{ display: 'inline-flex', alignItems: 'center', gap: '0.25rem', fontSize: '0.75rem' }}>
-                    <span className="bit-cell bit-parity" style={{ width: 14, height: 14, cursor: 'default' }}></span> Paridad Hamming
-                  </span>
-                  <span style={{ display: 'inline-flex', alignItems: 'center', gap: '0.25rem', fontSize: '0.75rem' }}>
-                    <span className="bit-cell bit-global" style={{ width: 14, height: 14, cursor: 'default' }}></span> Paridad Global (SEC-DED)
-                  </span>
-                  <span style={{ display: 'inline-flex', alignItems: 'center', gap: '0.25rem', fontSize: '0.75rem' }}>
-                    <span className="bit-cell bit-corrupted" style={{ width: 14, height: 14, cursor: 'default', animation: 'none' }}></span> Bit Invertido (Error)
-                  </span>
-                </div>
-              </div>
-
-              {/* Bit grid visualizer */}
-              <div className="bits-grid-container">
-                {workFileParsed.blocks.map(block => (
-                  <div key={block.index} className="block-row">
-                    <div className="block-header">
-                      <span>Módulo {block.index}</span>
-                      <span>Total bits: {block.bits.length}</span>
-                    </div>
-                    <div className="block-bits">
-                      {block.bits.map((bitVal, bitIdx) => {
-                        const bitNum = bitIdx + 1; // 1-indexed position
-                        const isGlobal = bitNum === workFileParsed.n;
-                        const isParity = isPowerOfTwo(bitNum) && !isGlobal;
-                        
-                        // Check if this bit was changed (we compare against original bytes if we want, or just render it active)
-                        // For styling simplicity, we can let user see 0/1, and if they click they see the color toggle
-                        let cellClass = "bit-cell bit-data";
-                        if (isGlobal) cellClass = "bit-cell bit-global";
-                        else if (isParity) cellClass = "bit-cell bit-parity";
-
-                        // We can mark flipped bits by tracking changes. For simplicity let's compare with the byte from original workFile
-                        // But since we write directly into rawBytes, we can just render the cell values!
-                        return (
-                          <div 
-                            key={bitIdx}
-                            className={cellClass}
-                            onClick={() => handleBitClick(block.index, bitNum)}
-                            title={`Pos: ${bitNum} (${isGlobal ? 'Paridad Global' : isParity ? 'Paridad' : 'Datos'}) - Haz clic para voltear`}
-                          >
-                            {bitVal}
-                          </div>
-                        );
-                      })}
-                    </div>
-                  </div>
-                ))}
-              </div>
-
-              <div style={{ display: 'flex', gap: '1rem' }}>
-                <button 
-                  className="btn-primary" 
-                  onClick={async () => {
-                    const blob = new Blob([workFileParsed.rawBytes], { type: 'application/octet-stream' });
-                    const file = new File([blob], workFile.name.replace('.HA', '.HE'), { type: 'application/octet-stream' });
-                    setWorkFile(file);
-                    setWorkFileType('corrupted');
-                    alert("Cambios guardados en memoria del Archivo de Trabajo. Ahora podés presionar 'Desproteger Archivo' en la pestaña Flujo de Trabajo.");
-                    setActiveTab('workflow');
-                  }}
-                >
-                  <CheckCircle size={16} /> Aplicar Errores a Archivo de Trabajo
-                </button>
-                <button 
-                  className="btn-secondary"
-                  onClick={async () => {
-                    // Dowload the corrupted file directly!
-                    const blob = new Blob([workFileParsed.rawBytes], { type: 'application/octet-stream' });
-                    const url = window.URL.createObjectURL(blob);
-                    const link = document.createElement('a');
-                    link.href = url;
-                    
-                    let ext = ".HE1";
-                    if (mPower === 10) ext = ".HE2";
-                    if (mPower === 14) ext = ".HE3";
-
-                    let base = workFile.name;
-                    if (base.contains(".")) base = base.substring(0, base.lastIndexOf("."));
-                    
-                    link.download = base + ext;
-                    link.click();
-                  }}
-                >
-                  <Download size={16} /> Descargar .HE (Con Errores)
-                </button>
-              </div>
-            </div>
-          )}
 
           {/* TAB 3: STATISTICS VIEW */}
           {activeTab === 'stats' && (
@@ -960,38 +959,42 @@ function App() {
                   Estadísticas de Compactación (Huffman)
                 </h2>
 
-                {apiResponse && apiResponse.frecuencias ? (
+                {huffmanStats && huffmanStats.frecuencias ? (
                   <div style={{ display: 'flex', flexDirection: 'column', gap: '1.5rem' }}>
                     <div className="stats-grid">
                       <div className="stat-item">
-                        <span className="stat-val">{apiResponse.tamanoOriginalBytes} B</span>
+                        <span className="stat-val">{huffmanStats.tamanoOriginalBytes} B</span>
                         <span className="stat-label">Tamaño Original</span>
                       </div>
                       <div className="stat-item">
-                        <span className="stat-val">{apiResponse.tamanoComprimidoBytes} B</span>
+                        <span className="stat-val">{huffmanStats.tamanoComprimidoBytes} B</span>
                         <span className="stat-label">Tamaño Comprimido</span>
                       </div>
                       <div className="stat-item">
-                        <span className="stat-val">{apiResponse.ratioCompresion.toFixed(2)}x</span>
+                        <span className="stat-val">{huffmanStats.ratioCompresion.toFixed(2)}x</span>
                         <span className="stat-label">Ratio de Compresión</span>
                       </div>
                       <div className="stat-item">
-                        <span className="stat-val">{((1 - (apiResponse.tamanoComprimidoBytes / apiResponse.tamanoOriginalBytes)) * 100).toFixed(1)}%</span>
+                        <span className="stat-val">
+                          {huffmanStats.tamanoOriginalBytes > 0 
+                            ? ((1 - (huffmanStats.tamanoComprimidoBytes / huffmanStats.tamanoOriginalBytes)) * 100).toFixed(1) 
+                            : '0.0'}%
+                        </span>
                         <span className="stat-label">Ahorro de Espacio</span>
                       </div>
                     </div>
 
                     <div className="stats-grid">
                       <div className="stat-item">
-                        <span className="stat-val">{apiResponse.entropia.toFixed(3)} bits</span>
+                        <span className="stat-val">{huffmanStats.entropia.toFixed(3)} bits</span>
                         <span className="stat-label">Entropía H(X)</span>
                       </div>
                       <div className="stat-item">
-                        <span className="stat-val">{apiResponse.longitudMedia.toFixed(3)} bits</span>
+                        <span className="stat-val">{huffmanStats.longitudMedia.toFixed(3)} bits</span>
                         <span className="stat-label">Longitud Media L</span>
                       </div>
                       <div className="stat-item">
-                        <span className="stat-val">{(apiResponse.eficiencia * 100).toFixed(1)}%</span>
+                        <span className="stat-val">{(huffmanStats.eficiencia * 100).toFixed(1)}%</span>
                         <span className="stat-label">Eficiencia &eta;</span>
                       </div>
                     </div>
@@ -1000,10 +1003,10 @@ function App() {
                     <div style={{ display: 'flex', flexDirection: 'column', gap: '0.5rem' }}>
                       <div style={{ display: 'flex', justifyContent: 'space-between', fontSize: '0.8rem' }}>
                         <span>Eficiencia del Código Huffman</span>
-                        <span style={{ fontWeight: 600 }}>{(apiResponse.eficiencia * 100).toFixed(1)}%</span>
+                        <span style={{ fontWeight: 600 }}>{(huffmanStats.eficiencia * 100).toFixed(1)}%</span>
                       </div>
                       <div className="progress-bar-container">
-                        <div className="progress-bar-fill" style={{ width: `${apiResponse.eficiencia * 100}%` }}></div>
+                        <div className="progress-bar-fill" style={{ width: `${huffmanStats.eficiencia * 100}%` }}></div>
                       </div>
                     </div>
 
@@ -1011,9 +1014,9 @@ function App() {
                     <div style={{ display: 'flex', flexDirection: 'column', gap: '0.5rem' }}>
                       <span className="form-label">Tabla de Códigos y Frecuencias</span>
                       <div className="freq-list">
-                        {Object.entries(apiResponse.frecuencias).map(([char, freq]) => {
+                        {Object.entries(huffmanStats.frecuencias).map(([char, freq]) => {
                           const charDisplay = char === ' ' ? '[Espacio]' : char === '\n' ? '[Salto de Línea]' : char;
-                          const code = apiResponse.codigos[char] || '';
+                          const code = huffmanStats.codigos[char] || '';
                           return (
                             <div className="freq-row" key={char}>
                               <span>Character: <strong>{charDisplay}</strong></span>
@@ -1028,7 +1031,7 @@ function App() {
                 ) : (
                   <div style={{ textAlign: 'center', padding: '2rem', color: 'var(--text-secondary)' }}>
                     <Info size={32} style={{ marginBottom: '1rem', opacity: 0.5 }} />
-                    <p>Subí un archivo y realizá la acción "Compactar Original" para visualizar las estadísticas de Huffman.</p>
+                    <p>Subí un archivo y realizá la acción "Compactar Original" o "Descompactar" para visualizar las estadísticas de Huffman.</p>
                   </div>
                 )}
               </div>
@@ -1056,19 +1059,39 @@ function App() {
                     </div>
                   </div>
                   
-                  {apiResponse && apiResponse.redundancyPercentage !== undefined && (
+                  {hammingStats && (
                     <div style={{ background: 'rgba(255,255,255,0.02)', padding: '1.25rem', border: '1px solid var(--surface-border)', borderRadius: 'var(--radius-md)', display: 'flex', flexDirection: 'column', gap: '0.75rem', marginTop: '0.5rem' }}>
                       <h4 style={{ fontSize: '0.9rem', color: 'var(--text-secondary)' }}>Estadísticas de la ejecución actual:</h4>
-                      <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: '1rem' }}>
-                        <div>
-                          <p style={{ fontSize: '0.75rem', color: 'var(--text-muted)' }}>Sobrecarga / Redundancia añadida:</p>
-                          <p style={{ fontSize: '1.5rem', fontWeight: 700, color: 'var(--secondary)' }}>{apiResponse.redundancyPercentage.toFixed(2)}%</p>
+                      
+                      {hammingStats.redundancyPercentage !== undefined && (
+                        <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: '1rem' }}>
+                          <div>
+                            <p style={{ fontSize: '0.75rem', color: 'var(--text-muted)' }}>Sobrecarga / Redundancia añadida:</p>
+                            <p style={{ fontSize: '1.5rem', fontWeight: 700, color: 'var(--secondary)' }}>{hammingStats.redundancyPercentage.toFixed(2)}%</p>
+                          </div>
+                          <div>
+                            <p style={{ fontSize: '0.75rem', color: 'var(--text-muted)' }}>Tamaño protegido:</p>
+                            <p style={{ fontSize: '1.5rem', fontWeight: 700, color: 'var(--text-main)' }}>{hammingStats.tamanoComprimidoBytes} Bytes</p>
+                          </div>
                         </div>
-                        <div>
-                          <p style={{ fontSize: '0.75rem', color: 'var(--text-muted)' }}>Tamaño protegido:</p>
-                          <p style={{ fontSize: '1.5rem', fontWeight: 700, color: 'var(--text-main)' }}>{apiResponse.tamanoComprimidoBytes} Bytes</p>
+                      )}
+
+                      {hammingStats.totalBlocks !== undefined && (
+                        <div style={{ display: 'grid', gridTemplateColumns: 'repeat(3, 1fr)', gap: '1rem', marginTop: '0.5rem' }}>
+                          <div>
+                            <p style={{ fontSize: '0.75rem', color: 'var(--text-muted)' }}>Bloques procesados:</p>
+                            <p style={{ fontSize: '1.5rem', fontWeight: 700, color: 'var(--text-main)' }}>{hammingStats.totalBlocks}</p>
+                          </div>
+                          <div>
+                            <p style={{ fontSize: '0.75rem', color: 'var(--text-muted)' }}>Errores corregidos (SEC):</p>
+                            <p style={{ fontSize: '1.5rem', fontWeight: 700, color: 'var(--success)' }}>{hammingStats.singleErrorsCorrected}</p>
+                          </div>
+                          <div>
+                            <p style={{ fontSize: '0.75rem', color: 'var(--text-muted)' }}>Errores dobles det. (DED):</p>
+                            <p style={{ fontSize: '1.5rem', fontWeight: 700, color: hammingStats.doubleErrorsDetected > 0 ? 'var(--danger)' : 'var(--text-main)' }}>{hammingStats.doubleErrorsDetected}</p>
+                          </div>
                         </div>
-                      </div>
+                      )}
                     </div>
                   )}
                 </div>

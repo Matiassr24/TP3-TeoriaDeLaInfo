@@ -1,4 +1,5 @@
 com\pm3\backend\controller\PM3Controller.class
+com\pm3\backend\ScratchTest.class
 com\pm3\backend\model\HuffmanNode.class
 com\pm3\backend\service\HammingService$UnprotectResult.class
 com\pm3\backend\core\PM3Header.class

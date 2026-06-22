@@ -25,6 +25,13 @@ public class HuffmanService {
             colaPrioridad.add(new HuffmanNode(entrada.getKey(), entrada.getValue()));
         }
 
+        // Si solo hay un carácter único, añadimos un nodo ficticio para tener un árbol válido (2-árbol)
+        if (colaPrioridad.size() == 1) {
+            HuffmanNode unico = colaPrioridad.poll();
+            HuffmanNode padre = new HuffmanNode(null, unico.getFrecuencia(), unico, new HuffmanNode('\0', 0));
+            return padre;
+        }
+
         while (colaPrioridad.size() > 1) {
             HuffmanNode izquierdo = colaPrioridad.poll();
             HuffmanNode derecho = colaPrioridad.poll();
@@ -107,44 +114,95 @@ public class HuffmanService {
         ByteArrayInputStream bais = new ByteArrayInputStream(datosComprimidos);
         DataInputStream dis = new DataInputStream(bais);
 
-        // 1. Leer tamaño de la tabla
-        int tamanoTabla = dis.readInt();
+        int tamanoTabla;
+        try {
+            tamanoTabla = dis.readInt();
+        } catch (Exception e) {
+            return new byte[0];
+        }
 
-        // 2. Leer tabla de frecuencias
+        // Heurística de robustez para tamanoTabla corrupto
+        if (tamanoTabla <= 0 || tamanoTabla > 256 || (4 + tamanoTabla * 6 + 8 > datosComprimidos.length)) {
+            int sugerido = tamanoTabla & 0xFF;
+            if (sugerido == 0) {
+                sugerido = 256;
+            }
+            tamanoTabla = sugerido;
+            
+            // Si aún así excede el tamaño del archivo, lo limitamos al máximo físicamente posible
+            if (4 + tamanoTabla * 6 + 8 > datosComprimidos.length) {
+                tamanoTabla = Math.max(1, (datosComprimidos.length - 12) / 6);
+            }
+        }
+
         Map<Character, Integer> frecuencias = new HashMap<>();
-        for (int i = 0; i < tamanoTabla; i++) {
-            char c = dis.readChar();
-            int freq = dis.readInt();
-            frecuencias.put(c, freq);
+        try {
+            for (int i = 0; i < tamanoTabla; i++) {
+                char c = dis.readChar();
+                int freq = dis.readInt();
+                frecuencias.put(c, freq);
+            }
+        } catch (Exception e) {
+            return new byte[0];
         }
 
         // 3. Reconstruir árbol
         HuffmanNode raiz = construirArbol(frecuencias);
+        if (raiz == null) {
+            return new byte[0];
+        }
 
         // 4. Leer total de bits
-        long totalBits = dis.readLong();
+        long totalBits;
+        try {
+            totalBits = dis.readLong();
+        } catch (Exception e) {
+            return new byte[0];
+        }
+
+        // Si totalBits se corrompe y es negativo (por ejemplo, por el bit de signo)
+        // o si es sospechosamente grande comparado con el tamaño del archivo restante
+        if (totalBits < 0 || totalBits > (long) bais.available() * 8) {
+            totalBits = (long) bais.available() * 8;
+        }
 
         // 5. Leer bits y recorrer árbol
         ByteArrayOutputStream descomprimido = new ByteArrayOutputStream();
         HuffmanNode actual = raiz;
         long bitsLeidos = 0;
 
-        while (bitsLeidos < totalBits) {
-            int b = dis.readUnsignedByte();
-            for (int i = 7; i >= 0 && bitsLeidos < totalBits; i--) {
-                int bit = (b >> i) & 1;
-                if (bit == 0) {
-                    actual = actual.getIzquierdo();
-                } else {
-                    actual = actual.getDerecho();
+        try {
+            while (bitsLeidos < totalBits) {
+                int b;
+                try {
+                    b = dis.readUnsignedByte();
+                } catch (EOFException e) {
+                    break;
                 }
+                for (int i = 7; i >= 0 && bitsLeidos < totalBits; i--) {
+                    int bit = (b >> i) & 1;
+                    if (actual == null) {
+                        actual = raiz;
+                    }
+                    if (bit == 0) {
+                        actual = actual.getIzquierdo();
+                    } else {
+                        actual = actual.getDerecho();
+                    }
 
-                if (actual.esHoja()) {
-                    descomprimido.write((byte) (actual.getCaracter() & 0xFF));
-                    actual = raiz;
+                    if (actual == null) {
+                        actual = raiz;
+                    }
+
+                    if (actual.esHoja()) {
+                        descomprimido.write((byte) (actual.getCaracter() & 0xFF));
+                        actual = raiz;
+                    }
+                    bitsLeidos++;
                 }
-                bitsLeidos++;
             }
+        } catch (Exception e) {
+            // Capturar cualquier otra excepción interna de decodificación y devolver lo recuperado
         }
 
         return descomprimido.toByteArray();

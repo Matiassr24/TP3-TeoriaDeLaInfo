@@ -1,0 +1,155 @@
+HOJA DE RUTA PARA LA EXPOSICION - PROYECTO LABORATORIO FINAL (PM3)
+==================================================================
+
+Esta guia presenta un ejemplo practico y describe el flujo de datos interno
+del programa paso a paso. Puedes utilizar este esquema como estructura para tu
+exposicion oral frente a los docentes.
+
+--------------------------------------------------------------------------------
+
+ESQUEMA GENERAL DEL FLUJO DE DATOS
+----------------------------------
+[mensaje.txt] --(Huffman Compress)--> [mensaje.huf] --(Hamming Protect)--> [mensaje.HA2]
+                                                                                |
+                                                                        (Inyector de Ruido)
+                                                                                |
+                                                                                v
+[mensaje.DC2] <--(Descomprimir <--- Corregir SEC-DED)-- [mensaje.HE2] <---------+
+ (Texto original)          (Auto-Huffman)
+
+--------------------------------------------------------------------------------
+
+PASO 1: COMPRESION DEL ARCHIVO ('mensaje.txt' a 'mensaje.huf')
+==============================================================
+
+A. Lo que se muestra en la Exposicion (Interfaz de Usuario):
+1. Cargamos un archivo de texto llamado 'mensaje.txt' (ej. de 50 KB).
+2. Se muestra una vista previa del texto plano en la pantalla.
+3. Presionamos el boton "Compactar" en la seccion de Huffman.
+4. El navegador descarga automaticamente el archivo comprimido 'mensaje.huf'
+   (que ahora pesa, por ejemplo, 28 KB).
+
+B. Lo que pasa Internamente (Algoritmos y Codigo):
+1. Peticion HTTP: El frontend envia el archivo al endpoint
+   '/api/pm3/huffman/compress' mediante un formulario MultipartFile.
+2. Calculo de Frecuencias: El metodo calcularFrecuencias recorre los bytes de
+   'mensaje.txt' y mapea cuantas veces aparece cada caracter en un HashMap.
+3. Estructura del Arbol: En construirArbol, se cargan estos caracteres en una
+   cola de prioridad (PriorityQueue) ordenada por frecuencia de menor a mayor.
+   Se agrupan los dos nodos de menor valor en un nodo padre recursivamente hasta
+   dejar un unico nodo raiz.
+4. Codificacion: Con generarCodigos, se realiza un recorrido recursivo en
+   profundidad (DFS). Cada rama izquierda acumula un "0" y cada rama derecha un "1".
+5. Formato Binario y Empaquetado: En comprimir, se escribe en el archivo:
+   - El numero de caracteres en la tabla (4 bytes).
+   - La tabla de frecuencias (simbolo + frecuencia para cada uno).
+   - La longitud exacta en bits del mensaje (totalBits, 8 bytes) para evitar
+     leer bits de relleno ("padding").
+   - Los bits empaquetados en bloques de 8 (bytes).
+
+--------------------------------------------------------------------------------
+
+PASO 2: PROTECCION CON HAMMING ('mensaje.huf' a 'mensaje.HA2')
+==============================================================
+
+A. Lo que se muestra en la Exposicion (Interfaz de Usuario):
+1. Subimos el archivo comprimido 'mensaje.huf' como Archivo de Trabajo.
+2. En el panel de Ajustes, seleccionamos Modulo 10 (bloque de 1024 bits).
+3. Activamos la opcion de Bloqueo Temporal y configuramos una hora de apertura
+   a 5 minutos en el futuro.
+4. Presionamos "Aplicar Proteccion Hamming".
+5. Se descarga el archivo protegido 'mensaje.HA2' (donde .HA indica Hamming
+   y 2 indica Modulo 10).
+
+B. Lo que pasa Internamente (Algoritmos y Codigo):
+1. Peticion HTTP: Se llama al endpoint '/api/pm3/hamming/protect' enviando el
+   archivo comprimido, el valor mPower = 10 y la fecha de bloqueo en milisegundos
+   (lockTimestamp).
+2. Fragmentacion en Bloques: El backend toma los bits de 'mensaje.huf' y los
+   procesa en bloques de datos de 1,013 bits (k).
+3. Distribucion en Grilla Hamming: En proteger, por cada bloque, crea un arreglo
+   de bits virtual de tamaño 1024 (posiciones 1 a 1024):
+   - Los bits de datos se ubican en las posiciones que no son potencias de 2
+     (ej. 3, 5, 6, 7, 9, etc.).
+   - Se calculan los 10 bits de paridad Hamming correspondientes a las potencias
+     de 2 (1, 2, 4, 8, ..., 512) usando paridad par sobre sus respectivos grupos.
+   - Se calcula el bit de paridad global sumando mediante XOR los elementos de
+     la posicion 1 a 1023, y el resultado se escribe en la posicion 1024 (n).
+4. Escritura de la Cabecera: Se antepone la cabecera fija de 16 bytes:
+   - Firma magica: 0x50 y 0x4D ('P' y 'M').
+   - Valor de potencia: 10.
+   - Huffman activo: 1 (verdadero).
+   - Tamano original del comprimido en bytes (para truncar rellenos al final).
+   - Timestamp UNIX de bloqueo temporal.
+
+--------------------------------------------------------------------------------
+
+PASO 3: SIMULACION DE CANAL CON RUIDO (INYECCION DE ERRORES)
+============================================================
+
+A. Lo que se muestra en la Exposicion (Interfaz de Usuario):
+1. En la pestana "Inyector de Errores", cargamos el archivo protegido
+   'mensaje.HA2'.
+2. Se dibuja automaticamente una grilla visual con los bloques de bits de
+   nuestro archivo.
+3. Hacemos clic en un bit cualquiera de datos del primer bloque (por ejemplo,
+   el tercer bit del bloque 0) para invertirlo.
+4. Presionamos el boton "Inyectar 2 errores programados" para introducir dos
+   errores en el bloque 0 en las posiciones 3 y 6.
+5. Descargamos el archivo modificado, que se guardara con la extension
+   'mensaje.HE2' (Hamming con errores de modulo 10).
+
+B. Lo que pasa Internamente (Algoritmos y Codigo):
+1. Lectura en React: El frontend lee la cabecera de 16 bytes directamente en
+   Javascript y extrae los parametros de bloque.
+2. Modificacion de Bits en Memoria: Al hacer clic en un bit de la grilla, el
+   codigo en React (handleBitClick) calcula el indice exacto del bit en el
+   flujo binario (saltandose la cabecera de 16 bytes) y realiza la operacion
+   XOR rawBytes[index] ^= 1 directamente en el buffer de memoria.
+3. El frontend descarga el archivo con la firma .HE2 para identificarlo como
+   corrupto/modificado.
+
+--------------------------------------------------------------------------------
+
+PASO 4: DESPROTECCION Y CORRECCION CON DESCOMPRESION INTEGRADA
+==============================================================
+
+A. Lo que se muestra en la Exposicion (Interfaz de Usuario):
+1. Cargamos el archivo corrupto 'mensaje.HE2' como Archivo de Trabajo.
+2. Activamos la casilla "Corregir Errores" y presionamos "Desproteger".
+3. Demostracion de Bloqueo: Si intentamos decodificarlo antes de que transcurran
+   los 5 minutos de bloqueo, la interfaz nos mostrara un cartel de "Archivo
+   Bloqueado" junto a un temporizador de cuenta regresiva en tiempo real.
+4. Una vez cumplido el tiempo de bloqueo, presionamos "Desproteger" de nuevo.
+5. El sistema procesa el archivo, corrige el error simple inyectado y detecta
+   el error doble programado sin corromper el archivo.
+6. El frontend muestra el texto plano recuperado identico al original en
+   pantalla y descarga el archivo restaurado 'mensaje.DC2' (Desprotegido y
+   Corregido).
+
+B. Lo que pasa Internamente (Algoritmos y Codigo):
+1. Control de Bloqueo en Servidor: Al llamar a '/api/pm3/hamming/unprotect',
+   PM3Header.isLocked() compara el tiempo del sistema contra el timestamp. Si
+   esta bloqueado, interrumpe el flujo de inmediato y responde con isLocked: true.
+2. Decodificacion Hamming y Correccion: Para cada bloque de 1024 bits:
+   - Calculo del Sindrome (S): Recalcula las paridades y suma los indices de
+     las paridades fallidas (ej. si fallaron paridades 1 y 2, el sindrome es
+     1+2=3).
+   - Paridad Global (P_global): Calcula la paridad de los 1024 bits completos.
+   - Deteccion y Correccion (SEC-DED):
+     * Caso 1 Error (Simple): Sindrome S != 0 y P_global = 1. El bit corrupto
+       esta en la posicion S. El codigo invierte el bit en block[S]
+       corrigiendolo exitosamente.
+     * Caso 2 Errores (Doble): Sindrome S != 0 y P_global = 0. Detiene la
+       correccion automatica (evitando cambiar bits correctos) y marca el bloque
+       con error doble detectado.
+3. Descompresion Huffman Automatica:
+   - El backend extrae los bits de datos de todos los bloques Hamming y
+     reconstruye los bytes del archivo comprimido.
+   - Lee en la cabecera PM3Header que el indicador de Huffman esta en 1.
+   - En lugar de entregar el binario comprimido al usuario, el controlador
+     invoca automaticamente a huffmanService.descomprimir pasandole estos bytes.
+   - El descompresor reconstruye el arbol de Huffman a partir de la tabla
+     integrada y decodifica el flujo de bits en caracteres legibles de texto plano.
+4. Respuesta: El backend retorna el texto plano limpio, las estadisticas de
+   transmision (cantidad de errores corregidos/detectados) y el archivo final .DC2.

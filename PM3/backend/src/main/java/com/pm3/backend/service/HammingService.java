@@ -207,11 +207,11 @@ public class HammingService {
         Random random = new Random();
         int erroresIntroducidos = 0;
 
-        // Seleccionamos un subconjunto aleatorio de bloques para introducir exactamente 1 error
         int totalBlocks = bits.size() / n;
+        double errorProbability = 0.01; // 1% de probabilidad por bloque
+
         for (int b = 0; b < totalBlocks; b++) {
-            // 50% de probabilidad de meter un error en este bloque
-            if (random.nextDouble() < 0.5) {
+            if (random.nextDouble() < errorProbability) {
                 int posError = random.nextInt(n); // 0 a n-1
                 int bitIndex = b * n + posError;
                 bits.set(bitIndex, bits.get(bitIndex) ^ 1);
@@ -219,7 +219,16 @@ public class HammingService {
             }
         }
 
-        System.out.println("Inyectados " + erroresIntroducidos + " errores aleatorios (max 1 por bloque).");
+        // Si no se inyectó ningún error y hay bloques, forzar exactamente 1 error al azar
+        if (erroresIntroducidos == 0 && totalBlocks > 0) {
+            int randomBlock = random.nextInt(totalBlocks);
+            int posError = random.nextInt(n);
+            int bitIndex = randomBlock * n + posError;
+            bits.set(bitIndex, bits.get(bitIndex) ^ 1);
+            erroresIntroducidos++;
+        }
+
+        System.out.println("Inyectados " + erroresIntroducidos + " errores aleatorios (tasa de error 1% de bloques, min 1).");
         byte[] corruptedData = bitsToBytes(bits);
 
         byte[] result = new byte[dataConHeader.length];
